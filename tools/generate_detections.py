@@ -4,7 +4,9 @@ import errno
 import argparse
 import numpy as np
 import cv2
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+#import tensorflow as tf
+import resource
 
 
 def _run_in_batches(f, data_dict, out, batch_size):
@@ -72,7 +74,6 @@ class ImageEncoder(object):
 
     def __init__(self, checkpoint_filename, input_name="images",
                  output_name="features"):
-        self.session = tf.Session()
         with tf.gfile.GFile(checkpoint_filename, "rb") as file_handle:
             graph_def = tf.GraphDef()
             graph_def.ParseFromString(file_handle.read())
@@ -146,12 +147,13 @@ def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
                 "Failed to created output directory '%s'" % output_dir)
 
     for sequence in os.listdir(mot_dir):
-        print("Processing %s" % sequence)
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        print("Processing {} - Mem: {}".format(sequence, usage))
         sequence_dir = os.path.join(mot_dir, sequence)
 
         image_dir = os.path.join(sequence_dir, "img1")
         image_filenames = {
-            int(os.path.splitext(f)[0]): os.path.join(image_dir, f)
+            int("".join(filter(str.isdigit, os.path.splitext(f)[0]))): os.path.join(image_dir, f)
             for f in os.listdir(image_dir)}
 
         detection_file = os.path.join(
@@ -163,7 +165,8 @@ def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
         min_frame_idx = frame_indices.astype(np.int).min()
         max_frame_idx = frame_indices.astype(np.int).max()
         for frame_idx in range(min_frame_idx, max_frame_idx + 1):
-            print("Frame %05d/%05d" % (frame_idx, max_frame_idx))
+            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            print("Frame {:05d}/{:05d} - Mem: {}".format(frame_idx, max_frame_idx, usage/1024))
             mask = frame_indices == frame_idx
             rows = detections_in[mask]
 

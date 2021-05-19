@@ -3,6 +3,7 @@ from __future__ import division, print_function, absolute_import
 
 import argparse
 import os
+import time
 
 import cv2
 import numpy as np
@@ -42,8 +43,8 @@ def gather_sequence_info(sequence_dir, detection_file):
     """
     image_dir = os.path.join(sequence_dir, "img1")
     image_filenames = {
-        int(os.path.splitext(f)[0]): os.path.join(image_dir, f)
-        for f in os.listdir(image_dir)}
+            int("".join(filter(str.isdigit, os.path.splitext(f)[0]))): os.path.join(image_dir, f)
+            for f in os.listdir(image_dir)}
     groundtruth_file = os.path.join(sequence_dir, "gt/gt.txt")
 
     detections = None
@@ -114,6 +115,7 @@ def create_detections(detection_mat, frame_idx, min_height=0):
         Returns detection responses at given frame index.
 
     """
+    #print(detection_mat)
     frame_indices = detection_mat[:, 0].astype(np.int)
     mask = frame_indices == frame_idx
 
@@ -162,9 +164,11 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
         "cosine", max_cosine_distance, nn_budget)
     tracker = Tracker(metric)
     results = []
+    t1 = time.time()
+
 
     def frame_callback(vis, frame_idx):
-        print("Processing frame %05d" % frame_idx)
+        print("\n\nProcessing frame %05d" % frame_idx)
 
         # Load image and generate detections.
         detections = create_detections(
@@ -181,13 +185,14 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
         # Update tracker.
         tracker.predict()
         tracker.update(detections)
+        time.sleep(1)
 
         # Update visualization.
         if display:
             image = cv2.imread(
                 seq_info["image_filenames"][frame_idx], cv2.IMREAD_COLOR)
             vis.set_image(image.copy())
-            vis.draw_detections(detections)
+            #vis.draw_detections(detections)
             vis.draw_trackers(tracker.tracks)
 
         # Store results.
