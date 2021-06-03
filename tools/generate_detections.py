@@ -2,12 +2,13 @@
 import os
 import errno
 import argparse
+import datetime
 import numpy as np
 import cv2
 import tensorflow.compat.v1 as tf
-#import tensorflow as tf
+#import tensorflow as tf2
+from tensorflow.python.compiler.tensorrt import trt_convert as trt
 import resource
-
 
 def _run_in_batches(f, data_dict, out, batch_size):
     data_len = len(out)
@@ -48,7 +49,7 @@ def extract_image_patch(image, bbox, patch_shape):
 
     """
     bbox = np.array(bbox)
-    if patch_shape is not None:
+    if patch_shape is not None: 
         # correct aspect ratio to patch shape
         target_aspect = float(patch_shape[1]) / patch_shape[0]
         new_width = target_aspect * bbox[3]
@@ -73,20 +74,49 @@ def extract_image_patch(image, bbox, patch_shape):
 class ImageEncoder(object):
 
     def __init__(self, checkpoint_filename, input_name="images",
-                 output_name="features"):
-        with tf.gfile.GFile(checkpoint_filename, "rb") as file_handle:
-            graph_def = tf.GraphDef()
-            graph_def.ParseFromString(file_handle.read())
-        tf.import_graph_def(graph_def, name="net")
+                 output_name="features"):        
+        tf.disable_v2_behavior()
+        tf_config= tf.ConfigProto(
+            gpu_options=tf.compat.v1.GPUOptions(per_process_gpu_memory_fraction=0.5))
+        
+        self.session = tf.Session(config=tf_config)
+        print("Loading protobuf file...")
+        t1 = datetime.datetime.now()
+        # with tf.gfile.GFile(checkpoint_filename, "rb") as file_handle:
+        #     graph_def = tf.GraphDef()
+        #     graph_def.ParseFromString(file_handle.read())
+        
+        # First deserialize your frozen graph:
+        print("Loading protobuf file...")
+        with tf.gfile.GFile("resources/networks/mars-small128.pb", "rb") as f:
+            frozen_graph = tf.GraphDef()
+            frozen_graph.ParseFromString(f.read())
+        print("Loading complete...")
+        # Now you can create a TensorRT inference graph from your
+        # frozen graph:
+        # print("Converting...")
+        # trt_graph = trt.create_inference_graph(
+        #     input_graph_def=frozen_graph,
+        #     outputs=["features"],
+        #     max_batch_size=1,
+        #     max_workspace_size_bytes=1 << 26,
+        #     precision_mode='FP16',
+        #     minimum_segment_size=2
+        # )
+        tf.import_graph_def(frozen_graph, name="net")
         self.input_var = tf.get_default_graph().get_tensor_by_name(
-            "%s:0" % input_name)
+            "net/%s:0" % input_name)
+        #self.input_var.set_shape([None, 128])
         self.output_var = tf.get_default_graph().get_tensor_by_name(
-            "%s:0" % output_name)
+            "net/%s:0" % output_name)
+        #self.output_var.set_shape([None, 128, 64, 3])
 
-        assert len(self.output_var.get_shape()) == 2
-        assert len(self.input_var.get_shape()) == 4
-        self.feature_dim = self.output_var.get_shape().as_list()[-1]
-        self.image_shape = self.input_var.get_shape().as_list()[1:]
+        #assert len(self.output_var.get_shape()) == 2
+        #assert len(self.input_var.get_shape()) == 4
+        #self.feature_dim = self.output_var.get_shape().as_list()[-1]
+        self.feature_dim = 128
+        #self.image_shape = self.input_var.get_shape().as_list()[1:]
+        self.image_shape = [128,64,3]
 
     def __call__(self, data_x, batch_size=32):
         out = np.zeros((len(data_x), self.feature_dim), np.float32)
@@ -94,6 +124,14 @@ class ImageEncoder(object):
             lambda x: self.session.run(self.output_var, feed_dict=x),
             {self.input_var: data_x}, out, batch_size)
         return out
+
+
+def show_graph_info(graph):
+    #count how many ops in trt_graph
+    trt_engine_ops = len([1 for n in graph.node if str(n.op)=='TRTEngineOp'])
+    print("numb. of trt_engine_ops in trt_graph", trt_engine_ops)
+    all_ops = len([1 for n in graph.node])
+    print("numb. of all_ops in in trt_graph:", all_ops)
 
 
 def create_box_encoder(model_filename, input_name="images",
@@ -115,6 +153,88 @@ def create_box_encoder(model_filename, input_name="images",
 
     return encoder
 
+
+def load_model_from_metacheck():
+    with tf.Session() as s:
+        loader = tf.train.import_meta_graph("resources/networks/mars-small128.ckpt-68577.meta")
+        loader.restore(s, "resources/networks/mars-small128.ckpt-68577")
+        
+        builder = tf.saved_model.builder.SavedModelBuilder("resources/networks/mars-small128_savedmodel/")
+        builder.save()
+
+
+def convert_to_trt():
+    print("Loading SavedModel...")
+    #conversion_params = trt.TrtConversionParams(precision_mode=trt.TrtPrecisionMode.FP16)
+    conversion_params = trt.DEFAULT_TRT_CONVERSION_PARAMS._replace(
+        precision_mode='FP16',
+        is_dynamic_op=True)
+    converter = trt.TrtGraphConverterV2(input_saved_model_dir="resources/networks/mars-small128_savedmodel/",
+        conversion_params=conversion_params)
+    # Converter method used to partition and optimize TensorRT compatible segments
+    print("Converting to TF-TRT...")
+    converter.convert()
+    print("Saving...")
+    converter.save("resources/networks/mars-small128_tf-trt")
+
+
+def convert_to_trt_from_frozen():
+    with tf.Session() as sess:
+        # First deserialize your frozen graph:
+        print("Loading protobuf file...")
+        with tf.gfile.GFile("resources/networks/mars-small128.pb", "rb") as f:
+            frozen_graph = tf.GraphDef()
+            frozen_graph.ParseFromString(f.read())
+        print("Loading complete...")
+        # Now you can create a TensorRT inference graph from your
+        # frozen graph:
+        print("Converting...")
+        # converter = trt.TrtGraphConverter(
+        #     input_graph_def=frozen_graph,
+        #     nodes_denylist=["features"]) #output nodes
+        # converter = trt.TrtGraphConverter(
+        #     input_saved_model_dir="resources/networks/mars-small128_savedmodel/",
+        #     input_saved_model_tags=["images"],
+        #     nodes_denylist=["features"]) #output nodes
+        # trt_graph = converter.convert()
+        trt_graph = trt.create_inference_graph(
+            input_graph_def=frozen_graph,
+            outputs=["features"],
+            max_batch_size=1,
+            max_workspace_size_bytes=1 << 26,
+            precision_mode='FP16',
+            minimum_segment_size=2
+        )
+        print("Conversion done.")
+        print("Saving...")
+        with open("resources/networks/mars-small128_trt", 'wb') as f:
+            f.write(trt_graph.SerializeToString())
+                
+        #converter.save("resources/networks/mars-small128_trt/")
+        print("Saved.")
+
+def get_graph():
+    with tf.Session() as sess:
+        # First deserialize your frozen graph:
+        print("Loading protobuf file...")
+        with tf.gfile.GFile("resources/networks/mars-small128.pb", "rb") as f:
+            frozen_graph = tf.GraphDef()
+            frozen_graph.ParseFromString(f.read())
+        print("Loading complete...")
+        # Now you can create a TensorRT inference graph from your
+        # frozen graph:
+        print("Converting...")
+        trt_graph = trt.create_inference_graph(
+            input_graph_def=frozen_graph,
+            outputs=["features"],
+            max_batch_size=32,
+            max_workspace_size_bytes=1 << 26,
+            precision_mode='FP16',
+            minimum_segment_size=2,
+            is_dynamic_op=True
+        )
+        return trt_graph
+        
 
 def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
     """Generate detections with features.
@@ -147,8 +267,8 @@ def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
                 "Failed to created output directory '%s'" % output_dir)
 
     for sequence in os.listdir(mot_dir):
-        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        print("Processing {} - Mem: {}".format(sequence, usage))
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print("Processing {} - Mem: {} MB".format(sequence, usage))
         sequence_dir = os.path.join(mot_dir, sequence)
 
         image_dir = os.path.join(sequence_dir, "img1")
@@ -164,6 +284,7 @@ def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
         frame_indices = detections_in[:, 0].astype(np.int)
         min_frame_idx = frame_indices.astype(np.int).min()
         max_frame_idx = frame_indices.astype(np.int).max()
+        t1 = datetime.datetime.now()
         for frame_idx in range(min_frame_idx, max_frame_idx + 1):
             usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             print("Frame {:05d}/{:05d} - Mem: {}".format(frame_idx, max_frame_idx, usage/1024))
@@ -178,6 +299,8 @@ def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
             features = encoder(bgr_image, rows[:, 2:6].copy())
             detections_out += [np.r_[(row, feature)] for row, feature
                                in zip(rows, features)]
+        t2 = datetime.datetime.now()
+        print("feature extraction time: {} seconds".format((t2-t1).seconds))
 
         output_filename = os.path.join(output_dir, "%s.npy" % sequence)
         np.save(
@@ -207,6 +330,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    #load_model_from_metacheck()
+    #convert_to_trt()
+    #convert_to_trt_from_frozen()
+    
     encoder = create_box_encoder(args.model, batch_size=32)
     generate_detections(encoder, args.mot_dir, args.output_dir,
                         args.detection_dir)
